@@ -96,14 +96,13 @@ ALIASES = {
     "whole sign": "WholeSign",
 }
 
-    @field_validator("house_system")
-    @classmethod
-    def valid_house(cls, v):
-        key = ALIASES.get(str(v).strip().lower(), v)
-        if key not in HOUSE_MAP:
-            raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
-        return key
-
+@field_validator("house_system")
+@classmethod
+def valid_house(cls, v):
+    key = ALIASES.get(str(v).strip().lower(), v)
+    if key not in HOUSE_MAP:
+        raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
+    return key
 
 def to_utc_iso(date_str, time_str, tzname):
     local_tz = tz.gettz(tzname)
