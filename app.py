@@ -25,8 +25,8 @@ from flatlib import const, aspects, angle
 from flatlib.geopos import GeoPos
 from flatlib.datetime import Datetime
 from flatlib.chart import Chart
-from flatlib import ephem
-ephem.set_ephe_path(".")
+import flatlib.ephem
+flatlib.ephem.ephepath = "."  # or "ephe" if you move the files later
 
 
 
