@@ -33,15 +33,16 @@ flatlib.ephem.ephepath = "."  # or "ephe" if you move the files later
 app = FastAPI(title="Natal Chart API", version="1.0.0")
 
 HOUSE_MAP = {
-    "Placidus": const.HOUSES_PLACIDUS,
-    "Koch": const.HOUSES_KOCH,
-    "Porphyry": const.HOUSES_PORPHYRIUS,       # <- correct constant name
-    "Porphyrius": const.HOUSES_PORPHYRIUS,     # allow either spelling
+    "Placidus":      const.HOUSES_PLACIDUS,
+    "Koch":          const.HOUSES_KOCH,
+    "Porphyry":      const.HOUSES_PORPHYRIUS,     # correct constant
+    "Porphyrius":    const.HOUSES_PORPHYRIUS,     # accept either label
     "Regiomontanus": const.HOUSES_REGIOMONTANUS,
-    "Campanus": const.HOUSES_CAMPANUS,
-    "Equal": const.HOUSES_EQUAL,
-    "WholeSign": const.HOUSES_WHOLESIGN
+    "Campanus":      const.HOUSES_CAMPANUS,
+    "Equal":         const.HOUSES_EQUAL,
+    "WholeSign":     const.HOUSES_WHOLE_SIGN      # <-- correct spelling
 }
+
 
 
 
@@ -94,6 +95,7 @@ ALIASES = {
     "porphyrius": "Porphyrius",
     "wholesign": "WholeSign",
     "whole sign": "WholeSign",
+    "whole-sign": "WholeSign",
 }
 
 @field_validator("house_system")
@@ -103,6 +105,7 @@ def valid_house(cls, v):
     if key not in HOUSE_MAP:
         raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
     return key
+
 
 def to_utc_iso(date_str, time_str, tzname):
     local_tz = tz.gettz(tzname)
