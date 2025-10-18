@@ -26,9 +26,8 @@ from flatlib.geopos import GeoPos
 from flatlib.datetime import Datetime
 from flatlib.chart import Chart
 from flatlib import ephem
+ephem.set_ephe_path(".")
 
-# Point flatlib to your ephemeris folder
-ephem.set_ephe_path(".")  # look for .se1 files in the repo root
 
 
 app = FastAPI(title="Natal Chart API", version="1.0.0")
