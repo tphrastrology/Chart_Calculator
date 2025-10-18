@@ -28,7 +28,8 @@ from flatlib.chart import Chart
 from flatlib import ephem
 
 # Point flatlib to your ephemeris folder
-ephem.set_ephe_path("ephe")
+ephem.set_ephe_path(".")  # look for .se1 files in the repo root
+
 
 app = FastAPI(title="Natal Chart API", version="1.0.0")
 
