@@ -35,12 +35,15 @@ app = FastAPI(title="Natal Chart API", version="1.0.0")
 HOUSE_MAP = {
     "Placidus": const.HOUSES_PLACIDUS,
     "Koch": const.HOUSES_KOCH,
-    "Porphyry": const.HOUSES_PORPHYRY,
+    "Porphyry": const.HOUSES_PORPHYRIUS,       # <- correct constant name
+    "Porphyrius": const.HOUSES_PORPHYRIUS,     # allow either spelling
     "Regiomontanus": const.HOUSES_REGIOMONTANUS,
     "Campanus": const.HOUSES_CAMPANUS,
     "Equal": const.HOUSES_EQUAL,
     "WholeSign": const.HOUSES_WHOLESIGN
 }
+
+
 
 PLANET_LIST = [
     const.SUN, const.MOON, const.MERCURY, const.VENUS, const.MARS,
@@ -85,6 +88,22 @@ class NatalInput(BaseModel):
         if v not in HOUSE_MAP:
             raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
         return v
+
+ALIASES = {
+    "porphyry": "Porphyry",
+    "porphyrius": "Porphyrius",
+    "wholesign": "WholeSign",
+    "whole sign": "WholeSign",
+}
+
+    @field_validator("house_system")
+    @classmethod
+    def valid_house(cls, v):
+        key = ALIASES.get(str(v).strip().lower(), v)
+        if key not in HOUSE_MAP:
+            raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
+        return key
+
 
 def to_utc_iso(date_str, time_str, tzname):
     local_tz = tz.gettz(tzname)
