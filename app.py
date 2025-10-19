@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 import swisseph as swe
 import os
+API_KEY = os.getenv("API_KEY")
 
 app = FastAPI(title="Natal Chart API", version="1.0.7-ultra")
 
