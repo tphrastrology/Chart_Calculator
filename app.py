@@ -28,8 +28,9 @@ from flatlib.chart import Chart
 import flatlib.ephem
 flatlib.ephem.ephepath = "."  # or "ephe" if you move the files later
 
-import flatlib.ephem
 import os
+import flatlib.ephem
+import swisseph as swe  # this is the pyswisseph module name
 
 
 app = FastAPI(title="Natal Chart API", version="1.0.0")
@@ -219,6 +220,52 @@ def natal(payload: NatalInput):
     except Exception as e:
         # Surface a readable error in the API instead of a generic 500
         raise HTTPException(status_code=500, detail=f"Calculation error: {e}")
+
+@app.get("/debug/ephe")
+def debug_ephe():
+    # 1) What path & files does the container actually have?
+    ephe_dir = flatlib.ephem.ephepath
+    files = []
+    try:
+        files = sorted(os.listdir(ephe_dir))
+    except Exception as e:
+        return {"ok": False, "step": "listdir", "ephe_dir": ephe_dir, "error": str(e)}
+
+    # 2) Confirm planet & moon tables exist and have nontrivial size
+    must = ["sepl_18.se1", "semo_18.se1"]  # 1800–2399 coverage (includes 1990+2005)
+    missing = [f for f in must if f not in files]
+    sizes = {}
+    for f in must:
+        p = os.path.join(ephe_dir, f)
+        sizes[f] = os.path.getsize(p) if os.path.exists(p) else 0
+
+    # 3) Ask pyswisseph to compute Sun for a known date/time in UT
+    #    If this fails, calc_ut will raise or return a short tuple.
+    try:
+        swe.set_ephe_path(ephe_dir)
+        jdut = swe.julday(1990, 6, 12, 18 + 23/60.0)  # 1990-06-12 18:23:00Z
+        res = swe.calc_ut(jdut, swe.SUN)  # returns (lon, lat, dist, lon_speed, lat_speed, dist_speed), flags
+        ok = isinstance(res, tuple) and len(res) >= 2
+        return {
+            "ok": ok,
+            "ephe_dir": ephe_dir,
+            "present_files": [f for f in files if f.endswith(".se1")][:10],
+            "must_have_missing": missing,
+            "must_have_sizes": sizes,
+            "calc_type": "SUN",
+            "calc_len": len(res) if isinstance(res, tuple) else None,
+            "calc_flags": res[1] if ok else None
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "ephe_dir": ephe_dir,
+            "present_files": [f for f in files if f.endswith(".se1")][:10],
+            "must_have_missing": missing,
+            "must_have_sizes": sizes,
+            "error": f"calc_ut failed: {e}"
+        }
+
 
 @app.get("/healthz")
 def health():
