@@ -3,3 +3,4 @@ uvicorn[standard]==0.30.6
 python-dateutil==2.9.0.post0
 pytz==2024.1
 swisseph==2.10.3.2
+
