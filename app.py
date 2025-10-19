@@ -48,12 +48,12 @@ HOUSE_MAP = {
 
 
 
+# Use Mean Node; we'll compute South Node by opposition
 PLANET_LIST = [
     const.SUN, const.MOON, const.MERCURY, const.VENUS, const.MARS,
     const.JUPITER, const.SATURN, const.URANUS, const.NEPTUNE, const.PLUTO,
-    const.MEAN_NODE  # use mean node; we'll derive South Node
+    const.MEAN_NODE
 ]
-
 
 # Aspect definitions: (name, exact_degrees, max_orb_degrees)
 ASPECTS = [
@@ -124,82 +124,94 @@ def to_utc_iso(date_str, time_str, tzname):
 @app.post("/natal")
 def natal(payload: NatalInput):
     try:
+        # 1) Normalize to UTC
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
+
+        # 2) Build flatlib objects
+        fl_dt = Datetime(utc_dt.strftime("%Y/%m/%d"), utc_dt.strftime("%H:%M"), "+00:00")
+        pos = GeoPos(lat=payload.latitude, lon=payload.longitude)
+
+        chart = Chart(fl_dt, pos, IDs=PLANET_LIST, hsys=HOUSE_MAP[payload.house_system])
+
+        # 3) Angles
+        asc = angle.ASC(chart)
+        mc  = angle.MC(chart)
+
+        # 4) Houses
+        houses = []
+        for i in range(1, 13):
+            cusp = chart.houses.getHouse(i)
+            s, d = lon_to_sign_deg(cusp.lon)
+            houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp.lon % 360.0, 4)})
+
+        # 5) Planets
+        def pt(name):
+            p = chart.get(name)
+            s, d = lon_to_sign_deg(p.lon)
+            return {
+                "name": p.body,
+                "sign": s,
+                "deg": d,
+                "lon": round(p.lon % 360.0, 4),
+                "lat": round(getattr(p, "lat", 0.0), 4),
+                "speed": round(getattr(p, "speed", 0.0), 5)
+            }
+
+        planets = [pt(p) for p in PLANET_LIST]
+
+        # Derive South Node as opposite of Mean Node
+        mean_node = chart.get(const.MEAN_NODE)
+        south_lon = (mean_node.lon + 180.0) % 360.0
+        s_sign, s_deg = lon_to_sign_deg(south_lon)
+        planets.append({
+            "name": "South Node",
+            "sign": s_sign,
+            "deg": s_deg,
+            "lon": round(south_lon, 4),
+            "lat": 0.0,
+            "speed": 0.0
+        })
+
+        # 6) Aspects (degree-based, version-proof)
+        asp_results = []
+        for i, a in enumerate(PLANET_LIST):
+            A = chart.get(a); lonA = A.lon % 360.0
+            for b in PLANET_LIST[i+1:]:
+                B = chart.get(b); lonB = B.lon % 360.0
+                dist = min(abs(lonA - lonB), 360.0 - abs(lonA - lonB))
+                for name, exact, orb in ASPECTS:
+                    diff = abs(dist - exact)
+                    if diff <= orb:
+                        asp_results.append({
+                            "a": A.body,
+                            "b": B.body,
+                            "type": name,
+                            "orb": round(diff, 2),
+                            "dist": round(dist, 2),
+                            "exact": exact
+                        })
+                        break
+
+        # 7) Response
+        asc_obj = angle_to_obj("ASC", asc.lon)
+        mc_obj  = angle_to_obj("MC",  mc.lon)
+
+        return {
+            "meta": {
+                "house_system": payload.house_system,
+                "datetime_utc": utc_iso,
+                "location": {"lat": payload.latitude, "lng": payload.longitude},
+            },
+            "angles": {"ASC": asc_obj, "MC": mc_obj},
+            "houses": houses,
+            "planets": planets,
+            "aspects": asp_results,
+            "rising_sign": {"sign": asc_obj["sign"], "deg": asc_obj["deg"]}
+        }
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    fl_dt = Datetime(utc_dt.strftime("%Y/%m/%d"), utc_dt.strftime("%H:%M"), "+00:00")
-    pos = GeoPos(lat=payload.latitude, lon=payload.longitude)
-    chart = Chart(fl_dt, pos, IDs=PLANET_LIST, hsys=HOUSE_MAP[payload.house_system])
-
-    try:
-        # Angles, houses, planets as you already have them…
-    ...
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ephemeris/ID error: {e}")
-
-
-    # angles & houses
-    asc = angle.ASC(chart); mc = angle.MC(chart)
-    houses = []
-    for i in range(1, 13):
-        cusp = chart.houses.getHouse(i)
-        s, d = lon_to_sign_deg(cusp.lon)
-        houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp.lon % 360.0, 4)})
-
-    # planets
-    def pt(name):
-        p = chart.get(name)
-        s, d = lon_to_sign_deg(p.lon)
-        return {"name": p.body, "sign": s, "deg": d, "lon": round(p.lon % 360.0, 4),
-                "lat": round(getattr(p, "lat", 0.0), 4), "speed": round(getattr(p, "speed", 0.0), 5)}
-    planets = [pt(p) for p in PLANET_LIST]
-
-    # Derive South Node as opposite the Mean Node
-    node = chart.get(const.MEAN_NODE)
-    south_lon = (node.lon + 180.0) % 360.0
-    s_sign, s_deg = lon_to_sign_deg(south_lon)
-    planets.append({
-        "name": "South Node",
-        "sign": s_sign,
-        "deg": s_deg,
-        "lon": round(south_lon, 4),
-        "lat": 0.0,
-        "speed": 0.0
-    })
-
-    # aspects
-    asp_results = []
-    for i, a in enumerate(PLANET_LIST):
-        A = chart.get(a); lonA = A.lon % 360.0
-        for b in PLANET_LIST[i+1:]:
-            B = chart.get(b); lonB = B.lon % 360.0
-            dist = min(abs(lonA - lonB), 360.0 - abs(lonA - lonB))
-            for name, exact, orb in ASPECTS:
-                diff = abs(dist - exact)
-                if diff <= orb:
-                    asp_results.append({
-                        "a": A.body,
-                        "b": B.body,
-                        "type": name,
-                        "orb": round(diff, 2),
-                        "dist": round(dist, 2),
-                        "exact": exact
-                    })
-                    break
-
-    asc_obj = angle_to_obj("ASC", asc.lon)
-    mc_obj  = angle_to_obj("MC",  mc.lon)
-
-    return {
-        "meta": {"house_system": payload.house_system, "datetime_utc": utc_iso,
-                 "location": {"lat": payload.latitude, "lng": payload.longitude}},
-        "angles": {"ASC": asc_obj, "MC": mc_obj},
-        "houses": houses,
-        "planets": planets,
-        "aspects": asp_results,
-        "rising_sign": {"sign": asc_obj["sign"], "deg": asc_obj["deg"]}
-    }
+        # Surface a readable error in the API instead of a generic 500
+        raise HTTPException(status_code=500, detail=f"Calculation error: {e}")
 
 @app.get("/healthz")
 def health():
