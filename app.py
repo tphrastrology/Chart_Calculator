@@ -34,7 +34,7 @@ API_KEY = os.getenv("API_KEY")
 EPHE_PATH = os.getenv("EPHE_PATH", ".")
 swe.set_ephe_path(EPHE_PATH)
 
-app = FastAPI(title="Natal Chart API", version="1.0.7-ultra-fixed")
+app = FastAPI(title="Natal Chart API", version="1.0.8-no-birth-time")
 
 # ---- House codes (Swiss Ephemeris expects a 1-byte code)
 HSYS_CHAR = {
@@ -71,7 +71,8 @@ ASPECTS = [
 
 class NatalInput(BaseModel):
     date: str = Field(..., example="1990-06-12")
-    time: str = Field(..., example="14:23")
+    # Make time optional; if missing/blank, we assume local noon and OMIT houses/ASC/MC
+    time: Optional[str] = Field(default=None, example="14:23")
     timezone: str = Field(..., example="America/New_York")
     latitude: float
     longitude: float
@@ -82,10 +83,7 @@ class NatalInput(BaseModel):
     def valid_house(cls, v):
         key = str(v).strip()
         if key not in HSYS_CHAR:
-            # keys are plain strings; don't .decode()
-            raise ValueError(
-                "house_system must be one of: " + ", ".join(HSYS_CHAR.keys())
-            )
+            raise ValueError("house_system must be one of: " + ", ".join(HSYS_CHAR.keys()))
         return key
 
 
@@ -96,18 +94,30 @@ def lon_to_sign_deg(lon: float):
     return SIGNS[sign_index], round(deg_in_sign, 2)
 
 
-def to_utc_iso(date_str, time_str, tzname):
+def to_utc_iso(date_str: str, time_str: Optional[str], tzname: str):
+    """Return (utc_dt, utc_iso, approx_time). If time_str is missing/blank, assume 12:00 local."""
     local_tz = tz.gettz(tzname)
     if not local_tz:
         raise ValueError("Invalid timezone string. Use IANA, e.g., 'America/New_York'.")
-    naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+
+    approx_time = False
+    t = (time_str or "").strip() if time_str is not None else ""
+    if not t:
+        t = "12:00"  # assume local noon when birth time is unknown
+        approx_time = True
+
+    # basic HH:MM sanity; if not valid, raise 400
+    try:
+        naive = datetime.strptime(f"{date_str} {t}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise ValueError("time must be HH:MM in 24h format (e.g., '09:30' or '18:05')")
+
     local_dt = naive.replace(tzinfo=local_tz)
     utc_dt = local_dt.astimezone(tz.UTC)
-    return utc_dt, utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc_dt, utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), approx_time
 
 
 def swe_calc_lonlat(jdut: float, planet_id: int):
-    # Strictly validate tuple shape at each step
     def ok(x):
         return isinstance(x, (list, tuple)) and len(x) >= 2
     try:
@@ -135,8 +145,8 @@ def natal(payload: NatalInput, x_api_key: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
-        # UTC & Julian Day
-        utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
+        # UTC & Julian Day (approx_time True if we assumed 12:00)
+        utc_dt, utc_iso, approx_time = to_utc_iso(payload.date, payload.time, payload.timezone)
         jdut = swe.julday(
             int(utc_dt.strftime("%Y")),
             int(utc_dt.strftime("%m")),
@@ -146,33 +156,7 @@ def natal(payload: NatalInput, x_api_key: Optional[str] = Header(default=None)):
         lat = float(payload.latitude)
         lon = float(payload.longitude)
 
-        # Houses & angles — pass a 1-byte house code (our dict already stores bytes)
-        hsys = HSYS_CHAR[payload.house_system]
-        cusps_raw, ascmc = swe.houses(jdut, lat, lon, hsys)
-        if not (isinstance(ascmc, (list, tuple)) and len(ascmc) >= 2):
-            raise RuntimeError("houses() did not return ASC/MC as expected")
-        asc_lon = float(ascmc[0])
-        mc_lon  = float(ascmc[1])
-
-        # Normalize cusp array defensively
-        if isinstance(cusps_raw, (list, tuple)):
-            L = len(cusps_raw)
-            if L == 13:
-                cusps = [float(cusps_raw[i]) for i in range(1, 13)]
-            elif L >= 12:
-                cusps = [float(cusps_raw[i]) for i in range(0, 12)]
-            else:
-                raise RuntimeError(f"Unexpected cusps length: {L}")
-        else:
-            raise RuntimeError("houses() cusps not list/tuple")
-
-        houses = []
-        for i in range(12):
-            cusp_lon = cusps[i]
-            s, d = lon_to_sign_deg(cusp_lon)
-            houses.append({"n": i+1, "sign": s, "deg": d, "lon": round(cusp_lon % 360.0, 4)})
-
-        # Planets
+        # Planets (independent of houses/angles)
         planets = []
         body_lons = {}
         for label in PLANET_LABELS:
@@ -187,7 +171,7 @@ def natal(payload: NatalInput, x_api_key: Optional[str] = Header(default=None)):
             except Exception as e:
                 planets.append({"name": label, "error": f"calc failed: {e}"})
 
-        # Nodes
+        # Nodes (Mean if available, else True) + South Node
         try:
             node_pid = getattr(swe, "MEAN_NODE", getattr(swe, "TRUE_NODE"))
             node_lon, _ = swe_calc_lonlat(jdut, node_pid)
@@ -207,7 +191,44 @@ def natal(payload: NatalInput, x_api_key: Optional[str] = Header(default=None)):
         except Exception:
             pass
 
-        # Aspects
+        # Houses/angles/rising_sign only if birth time is known (not approximated)
+        houses = []
+        angles = {"ASC": None, "MC": None}
+        rising = None
+        if not approx_time:
+            hsys = HSYS_CHAR[payload.house_system]
+            cusps_raw, ascmc = swe.houses(jdut, lat, lon, hsys)
+            if not (isinstance(ascmc, (list, tuple)) and len(ascmc) >= 2):
+                raise RuntimeError("houses() did not return ASC/MC as expected")
+            asc_lon = float(ascmc[0])
+            mc_lon  = float(ascmc[1])
+
+            # Normalize cusp array defensively
+            if isinstance(cusps_raw, (list, tuple)):
+                L = len(cusps_raw)
+                if L == 13:
+                    cusps = [float(cusps_raw[i]) for i in range(1, 13)]
+                elif L >= 12:
+                    cusps = [float(cusps_raw[i]) for i in range(0, 12)]
+                else:
+                    raise RuntimeError(f"Unexpected cusps length: {L}")
+            else:
+                raise RuntimeError("houses() cusps not list/tuple")
+
+            for i in range(12):
+                cusp_lon = cusps[i]
+                s, d = lon_to_sign_deg(cusp_lon)
+                houses.append({"n": i+1, "sign": s, "deg": d, "lon": round(cusp_lon % 360.0, 4)})
+
+            asc_sign, asc_deg = lon_to_sign_deg(asc_lon)
+            mc_sign, mc_deg   = lon_to_sign_deg(mc_lon)
+            angles = {
+                "ASC": {"name":"ASC","sign":asc_sign,"deg":asc_deg,"lon":round(asc_lon,4)},
+                "MC":  {"name":"MC","sign":mc_sign,"deg":mc_deg,"lon":round(mc_lon,4)}
+            }
+            rising = {"sign": asc_sign, "deg": asc_deg}
+
+        # Aspects from computed longitudes (independent of time for planets; moon varies but fine)
         names_for_aspects = [n for n in PLANET_LABELS + ["North Node","South Node"] if n in body_lons]
         asp_results = []
         for i, na in enumerate(names_for_aspects):
@@ -224,26 +245,24 @@ def natal(payload: NatalInput, x_api_key: Optional[str] = Header(default=None)):
                         })
                         break
 
-        # Format angles
-        asc_sign, asc_deg = lon_to_sign_deg(asc_lon)
-        mc_sign, mc_deg   = lon_to_sign_deg(mc_lon)
-
         return {
             "meta": {
                 "house_system": payload.house_system,
                 "datetime_utc": utc_iso,
+                "time_assumed_noon": approx_time,
                 "location": {"lat": lat, "lng": lon},
             },
-            "angles": {"ASC": {"name":"ASC","sign":asc_sign,"deg":asc_deg,"lon":round(asc_lon,4)},
-                        "MC":  {"name":"MC","sign":mc_sign,"deg":mc_deg,"lon":round(mc_lon,4)}},
-            "houses": houses,
+            "angles": angles,             # None if time missing
+            "houses": houses,             # [] if time missing
             "planets": planets,
             "aspects": asp_results,
-            "rising_sign": {"sign": asc_sign, "deg": asc_deg},
+            "rising_sign": rising         # None if time missing
         }
 
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Calculation error: {e}")
 
@@ -251,3 +270,4 @@ def natal(payload: NatalInput, x_api_key: Optional[str] = Header(default=None)):
 @app.get("/healthz")
 def health():
     return {"ok": True}
+
