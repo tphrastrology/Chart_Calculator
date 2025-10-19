@@ -21,19 +21,17 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 # ---- Libraries
-# Flatlib kept only for constants in case you extend later.
-from flatlib import const  # not required for core calc
 import flatlib.ephem
 import swisseph as swe
 import os
 
-app = FastAPI(title="Natal Chart API", version="1.0.3")
+app = FastAPI(title="Natal Chart API", version="1.0.4")
 
 # ---- Ephemeris path (point to repo root or 'ephe')
 flatlib.ephem.ephepath = os.getenv("EPHE_PATH", ".")
 swe.set_ephe_path(flatlib.ephem.ephepath)
 
-# ---- House system mapping for Swiss Ephemeris
+# ---- House system mapping for Swiss Ephemeris (H must be bytes for houses_ex)
 # Swiss letters: P=Placidus, K=Koch, O=Porphyry, R=Regiomontanus, C=Campanus, E=Equal, W=Whole Sign
 HSYS_CHAR = {
     "Placidus":      "P",
@@ -111,6 +109,9 @@ ALIASES = {
     "whole-sign": "WholeSign",
 }
 
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional
+
 class NatalInput(BaseModel):
     date: str = Field(..., example="1990-06-12")
     time: str = Field(..., example="14:23")
@@ -138,28 +139,31 @@ def to_utc_iso(date_str, time_str, tzname):
     utc_dt = local_dt.astimezone(tz.UTC)
     return utc_dt, utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-# ---- Houses/angles helper (handles both signatures)
+# ---- Houses/angles helper (handles both signatures precisely)
 
 def compute_houses_angles(jdut: float, geolat: float, geolon: float, hsys_char: str):
-    """Return (cusps_list, asc_lon, mc_lon) using houses_ex if available, else houses()."""
-    # Try houses_ex with flags first: (jdut, flags, lat, lon, hsys)
+    """Return (cusps_list, asc_lon, mc_lon).
+    - Try houses_ex(jdut, flags, lat, lon, b'H').
+    - If that TypeErrors, fall back to houses(jdut, lat, lon, 'H').
+    """
+    # First, try houses_ex with bytes code
     try:
-        cusps, ascmc = swe.houses_ex(jdut, swe.FLG_SWIEPH, geolat, geolon, hsys_char.encode())
+        cusps, ascmc = swe.houses_ex(jdut, swe.FLG_SWIEPH, geolat, geolon, hsys_char.encode("ascii"))
         asc_lon = ascmc[0]
-        mc_lon = ascmc[1]
+        mc_lon  = ascmc[1]
         return cusps, asc_lon, mc_lon
     except TypeError:
-        # Fallback signature: houses(jdut, lat, lon, hsys_char)
-        cusps, ascmc = swe.houses(jdut, geolat, geolon, hsys_char)
-        # ascmc is (Asc, MC, ARMC, Vertex, EquAsc, co-Asc(W), co-Asc(M), PolarAsc)
-        asc_lon = ascmc[0]
-        mc_lon = ascmc[1]
-        return cusps, asc_lon, mc_lon
+        pass
+    # Fallback: older signature uses str for house code
+    cusps, ascmc = swe.houses(jdut, geolat, geolon, hsys_char)
+    asc_lon = ascmc[0]
+    mc_lon  = ascmc[1]
+    return cusps, asc_lon, mc_lon
 
 # ---- Endpoint
 
 @app.post("/natal")
-def natal(payload: NatalInput, request: Request):
+def natal(payload: NatalInput):
     try:
         # 1) Normalize to UTC
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
@@ -174,7 +178,7 @@ def natal(payload: NatalInput, request: Request):
         lat = payload.latitude
         lon = payload.longitude
 
-        # 3) Houses & angles via Swiss (compatible with both APIs)
+        # 3) Houses & angles
         hsys_char = HSYS_CHAR[payload.house_system]
         cusps, asc_lon, mc_lon = compute_houses_angles(jdut, lat, lon, hsys_char)
         houses = []
@@ -259,6 +263,7 @@ def natal(payload: NatalInput, request: Request):
 @app.get("/healthz")
 def health():
     return {"ok": True}
+
 
 
 
