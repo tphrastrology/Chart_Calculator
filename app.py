@@ -152,8 +152,11 @@ def natal(payload: NatalInput):
             houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp.lon % 360.0, 4)})
 
         # 5) Planets
+        planets = []
+        errors = []
+        
         def pt(name):
-            p = chart.get(name)
+            p = chart.get(name)  # if this line crashes for a body, we'll trap it below
             s, d = lon_to_sign_deg(p.lon)
             return {
                 "name": p.body,
@@ -163,21 +166,31 @@ def natal(payload: NatalInput):
                 "lat": round(getattr(p, "lat", 0.0), 4),
                 "speed": round(getattr(p, "speed", 0.0), 5)
             }
+        
+        for name in PLANET_LIST:
+            try:
+                planets.append(pt(name))
+            except Exception as e:
+                # Record the body that failed so the response is still useful
+                bname = name if isinstance(name, str) else getattr(name, "name", str(name))
+                errors.append({"body": bname, "error": str(e)})
+        
+        # Add South Node only if the node fetched cleanly
+        try:
+            node = chart.get(NODE_ID)
+            south_lon = (node.lon + 180.0) % 360.0
+            s_sign, s_deg = lon_to_sign_deg(south_lon)
+            planets.append({
+                "name": "South Node",
+                "sign": s_sign,
+                "deg": s_deg,
+                "lon": round(south_lon, 4),
+                "lat": 0.0,
+                "speed": 0.0
+            })
+        except Exception as e:
+            errors.append({"body": "South Node (derived)", "error": str(e)})
 
-        planets = [pt(p) for p in PLANET_LIST]
-
-        # Derive South Node as opposite of the selected Node
-        node = chart.get(NODE_ID)
-        south_lon = (node.lon + 180.0) % 360.0
-        s_sign, s_deg = lon_to_sign_deg(south_lon)
-        planets.append({
-            "name": "South Node",
-            "sign": s_sign,
-            "deg": s_deg,
-            "lon": round(south_lon, 4),
-            "lat": 0.0,
-            "speed": 0.0
-        })
 
 
         # 6) Aspects (degree-based, version-proof)
@@ -214,7 +227,8 @@ def natal(payload: NatalInput):
             "houses": houses,
             "planets": planets,
             "aspects": asp_results,
-            "rising_sign": {"sign": asc_obj["sign"], "deg": asc_obj["deg"]}
+            "rising_sign": {"sign": asc_obj["sign"], "deg": asc_obj["deg"]},
+            "debug_errors": errors  # <— temporary; remove later
         }
 
     except Exception as e:
