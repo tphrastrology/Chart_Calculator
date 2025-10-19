@@ -16,116 +16,57 @@
 
 from datetime import datetime
 from dateutil import tz
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
-# flatlib / Swiss Ephemeris
+# ---- Libraries
 from flatlib import const, angle
 from flatlib.geopos import GeoPos
 from flatlib.datetime import Datetime
 from flatlib.chart import Chart
-import swisseph as swe
 import flatlib.ephem
-flatlib.ephem.ephepath = "."      # or "ephe" if that’s where your files are
+import swisseph as swe
+import os
+
+# ---- Ephemeris path (point to repo root or 'ephe')
+flatlib.ephem.ephepath = os.getenv("EPHE_PATH", ".")
 swe.set_ephe_path(flatlib.ephem.ephepath)
 
-# pyswisseph-based calculator with robust fallbacks
-def swe_calc_lonlat(jdut, planet_id):
-    """Return (lon, lat) using Swiss ephemeris; fallback to Moshier if needed."""
-    # 1) Try Swiss ephemeris with speed flag (safe default)
-    try:
-        vals, flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
-        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
-            return vals[0] % 360.0, vals[1]
-    except Exception:
-        pass
-    # 2) Fallback to Swiss ephemeris without speed
-    try:
-        vals, flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH)
-        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
-            return vals[0] % 360.0, vals[1]
-    except Exception:
-        pass
-    # 3) Last resort: Moshier (no .se1 files needed)
-    vals, flags = swe.calc_ut(jdut, planet_id, swe.FLG_MOSEPH)
-    if not (isinstance(vals, (list, tuple)) and len(vals) >= 2):
-        raise RuntimeError("pyswisseph returned invalid tuple")
-    return vals[0] % 360.0, vals[1]
+app = FastAPI(title="Natal Chart API", version="1.0.1")
 
-
-def pt_with_fallback(name):
-    """Return planet dict; fallback via swe.calc_ut for Saturn/Uranus if flatlib chokes."""
-    try:
-        p = chart.get(name)
-        s, d = lon_to_sign_deg(p.lon)
-        return {
-            "name": p.body,
-            "sign": s, "deg": d,
-            "lon": round(p.lon % 360.0, 4),
-            "lat": round(getattr(p, "lat", 0.0), 4),
-            "speed": round(getattr(p, "speed", 0.0), 5)
-        }
-    except Exception:
-        # fallback only for Saturn/Uranus
-        name_map = {
-            getattr(const, "SATURN"):  swe.SATURN,
-            getattr(const, "URANUS"):  swe.URANUS,
-        }
-        if name not in name_map:
-            raise  # rethrow for others
-
-        # compute via pyswisseph
-        swe.set_ephe_path(flatlib.ephem.ephepath)
-        jdut = swe.julday(
-            int(utc_dt.strftime("%Y")),
-            int(utc_dt.strftime("%m")),
-            int(utc_dt.strftime("%d")),
-            int(utc_dt.strftime("%H")) + int(utc_dt.strftime("%M"))/60.0
-        )
-        vals, _flags = swe.calc_ut(jdut, name_map[name])  # (lon, lat, dist, …)
-        lon = vals[0] % 360.0
-        s, d = lon_to_sign_deg(lon)
-        label = "Saturn" if name == getattr(const, "SATURN") else "Uranus"
-        return {
-            "name": label,
-            "sign": s, "deg": d,
-            "lon": round(lon, 4),
-            "lat": round(vals[1], 4) if len(vals) > 1 else 0.0,
-            "speed": 0.0  # leave 0.0; speed via fallback is optional
-        }
-
-app = FastAPI(title="Natal Chart API", version="1.0.0")
-
+# ---- House systems (flatlib constant names vary; these are correct)
 HOUSE_MAP = {
     "Placidus":      const.HOUSES_PLACIDUS,
     "Koch":          const.HOUSES_KOCH,
-    "Porphyry":      const.HOUSES_PORPHYRIUS,     # correct constant
-    "Porphyrius":    const.HOUSES_PORPHYRIUS,     # accept either label
+    "Porphyry":      const.HOUSES_PORPHYRIUS,  # spelling in flatlib
+    "Porphyrius":    const.HOUSES_PORPHYRIUS,
     "Regiomontanus": const.HOUSES_REGIOMONTANUS,
     "Campanus":      const.HOUSES_CAMPANUS,
     "Equal":         const.HOUSES_EQUAL,
-    "WholeSign":     const.HOUSES_WHOLE_SIGN      # <-- correct spelling
+    "WholeSign":     const.HOUSES_WHOLE_SIGN,
 }
 
-# ---- Node ID selection (handles different flatlib versions) ----
-# We'll pick whichever lunar node constant exists in this flatlib build.
-for _attr in ("MEAN_NODE", "TRUE_NODE", "NORTH_NODE"):
-    if hasattr(const, _attr):
-        NODE_ID = getattr(const, _attr)
-        break
-else:
-    raise ImportError("No lunar node constant (MEAN/TRUE/NORTH) found in flatlib.const")
-
-# Use the chosen node ID; we'll compute South Node ourselves later.
-PLANET_LIST = [
-  const.SUN, const.MOON,
-  const.MERCURY, const.VENUS, const.MARS,
-  const.JUPITER, const.SATURN
+# ---- Signs + helpers
+SIGNS = [
+    "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
+    "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
 ]
 
+def lon_to_sign_deg(lon: float):
+    lon = lon % 360.0
+    sign_index = int(lon // 30)
+    deg_in_sign = lon - sign_index * 30
+    return SIGNS[sign_index], round(deg_in_sign, 2)
 
-# Aspect definitions: (name, exact_degrees, max_orb_degrees)
+def angle_to_obj(name: str, lon: float):
+    sign, deg = lon_to_sign_deg(lon)
+    return {"name": name, "sign": sign, "deg": deg, "lon": round(lon % 360.0, 4)}
+
+# ---- Planet labels and aspect definitions
+PLANET_LABELS = [
+    "Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","Uranus","Neptune","Pluto"
+]
 ASPECTS = [
     ("conjunction", 0,   8),
     ("opposition",  180, 8),
@@ -134,36 +75,35 @@ ASPECTS = [
     ("sextile",     60,  5),
 ]
 
-SIGNS = [
-    "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
-    "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
-]
+# ---- Robust pyswisseph calculator
+# Tries Swiss ephemeris with speed, then without, then Moshier fallback.
+# Always returns (lon, lat).
 
-def lon_to_sign_deg(lon):
-    lon = lon % 360.0
-    sign_index = int(lon // 30)
-    deg_in_sign = lon - sign_index * 30
-    return SIGNS[sign_index], round(deg_in_sign, 2)
+def swe_calc_lonlat(jdut: float, planet_id: int):
+    try:
+        vals, _flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
+            return vals[0] % 360.0, vals[1]
+    except Exception:
+        pass
+    try:
+        vals, _flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH)
+        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
+            return vals[0] % 360.0, vals[1]
+    except Exception:
+        pass
+    vals, _flags = swe.calc_ut(jdut, planet_id, swe.FLG_MOSEPH)
+    if not (isinstance(vals, (list, tuple)) and len(vals) >= 2):
+        raise RuntimeError("pyswisseph returned invalid tuple")
+    return vals[0] % 360.0, vals[1]
 
-def angle_to_obj(name, lon):
-    sign, deg = lon_to_sign_deg(lon)
-    return {"name": name, "sign": sign, "deg": deg, "lon": round(lon % 360.0, 4)}
+SWE_IDS = {
+    "Sun": swe.SUN, "Moon": swe.MOON, "Mercury": swe.MERCURY, "Venus": swe.VENUS,
+    "Mars": swe.MARS, "Jupiter": swe.JUPITER, "Saturn": swe.SATURN,
+    "Uranus": swe.URANUS, "Neptune": swe.NEPTUNE, "Pluto": swe.PLUTO,
+}
 
-class NatalInput(BaseModel):
-    date: str = Field(..., example="1990-06-12")          # YYYY-MM-DD
-    time: str = Field(..., example="14:23")               # 24h HH:MM
-    timezone: str = Field(..., example="America/New_York")# IANA timezone
-    latitude: float
-    longitude: float
-    house_system: Optional[str] = Field(default="Placidus")
-
-    @field_validator("house_system")
-    @classmethod
-    def valid_house(cls, v):
-        if v not in HOUSE_MAP:
-            raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
-        return v
-
+# ---- Request model
 ALIASES = {
     "porphyry": "Porphyry",
     "porphyrius": "Porphyrius",
@@ -172,14 +112,23 @@ ALIASES = {
     "whole-sign": "WholeSign",
 }
 
-@field_validator("house_system")
-@classmethod
-def valid_house(cls, v):
-    key = ALIASES.get(str(v).strip().lower(), v)
-    if key not in HOUSE_MAP:
-        raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
-    return key
+class NatalInput(BaseModel):
+    date: str = Field(..., example="1990-06-12")
+    time: str = Field(..., example="14:23")
+    timezone: str = Field(..., example="America/New_York")
+    latitude: float
+    longitude: float
+    house_system: Optional[str] = Field(default="Placidus")
 
+    @field_validator("house_system")
+    @classmethod
+    def valid_house(cls, v):
+        key = ALIASES.get(str(v).strip().lower(), v)
+        if key not in HOUSE_MAP:
+            raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
+        return key
+
+# ---- Time helper
 
 def to_utc_iso(date_str, time_str, tzname):
     local_tz = tz.gettz(tzname)
@@ -190,101 +139,73 @@ def to_utc_iso(date_str, time_str, tzname):
     utc_dt = local_dt.astimezone(tz.UTC)
     return utc_dt, utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+# ---- Endpoint
+
 @app.post("/natal")
-def natal(payload: NatalInput):
+def natal(payload: NatalInput, request: Request):
     try:
         # 1) Normalize to UTC
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
 
-        # 2) Build flatlib objects
+        # 2) Build a Chart WITHOUT objects to avoid flatlib ephem calls
+        #    IDs=[] prevents Chart() from preloading planetary objects (the source of tuple errors)
         fl_dt = Datetime(utc_dt.strftime("%Y/%m/%d"), utc_dt.strftime("%H:%M"), "+00:00")
         pos = GeoPos(lat=payload.latitude, lon=payload.longitude)
+        chart = Chart(fl_dt, pos, IDs=[], hsys=HOUSE_MAP[payload.house_system])
 
-        chart = Chart(fl_dt, pos, hsys=HOUSE_MAP[payload.house_system])  # no IDs preload
-
-        # 3) Angles
+        # 3) Angles & houses are safe via flatlib
         asc = angle.ASC(chart)
         mc  = angle.MC(chart)
-
-        # 4) Houses
         houses = []
         for i in range(1, 13):
             cusp = chart.houses.getHouse(i)
             s, d = lon_to_sign_deg(cusp.lon)
             houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp.lon % 360.0, 4)})
 
-        # 5) Planets
-        # --- planets via pyswisseph to avoid flatlib tuple issues ---
-        # Build Julian Day in UTC for pyswisseph
+        # 4) Planet longitudes via pyswisseph (robust & independent of flatlib objects)
         jdut = swe.julday(
             int(utc_dt.strftime("%Y")),
             int(utc_dt.strftime("%m")),
             int(utc_dt.strftime("%d")),
-            int(utc_dt.strftime("%H")) + int(utc_dt.strftime("%M"))/60.0
+            int(utc_dt.strftime("%H")) + int(utc_dt.strftime("%M"))/60.0,
         )
-        
-        planet_labels = ["Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","Uranus","Neptune","Pluto"]
+
         planets = []
-        
-        for label in planet_labels:
+        body_lons = {}
+        for label in PLANET_LABELS:
             try:
                 lon, lat = swe_calc_lonlat(jdut, SWE_IDS[label])
                 s, d = lon_to_sign_deg(lon)
+                body_lons[label] = lon
                 planets.append({
-                    "name": label,
-                    "sign": s,
-                    "deg": d,
-                    "lon": round(lon, 4),
-                    "lat": round(lat, 4),
-                    "speed": 0.0  # omit true speed to keep things simple/stable
+                    "name": label, "sign": s, "deg": d,
+                    "lon": round(lon, 4), "lat": round(lat, 4), "speed": 0.0
                 })
             except Exception as e:
-                # If any single body fails, skip it but keep the API responsive
-                planets.append({
-                    "name": label,
-                    "error": f"calc failed: {e}"
-                })
-        
-        # Node + South Node (derived)
+                planets.append({"name": label, "error": f"calc failed: {e}"})
+
+        # Nodes (Mean if present, else True) + South Node
         try:
-            # Use mean node if available in your flatlib build; otherwise compute via pyswisseph
-            if 'NODE_ID' in globals():
-                node_obj = chart.get(NODE_ID)
-                node_lon = node_obj.lon % 360.0
-            else:
-                node_lon, _ = swe_calc_lonlat(jdut, getattr(swe, "MEAN_NODE", swe.TRUE_NODE))
+            node_pid = getattr(swe, "MEAN_NODE", getattr(swe, "TRUE_NODE"))
+            node_lon, _ = swe_calc_lonlat(jdut, node_pid)
             n_sign, n_deg = lon_to_sign_deg(node_lon)
+            body_lons["North Node"] = node_lon
             planets.append({
-                "name": "North Node",
-                "sign": n_sign, "deg": n_deg,
+                "name": "North Node", "sign": n_sign, "deg": n_deg,
                 "lon": round(node_lon, 4), "lat": 0.0, "speed": 0.0
             })
             south_lon = (node_lon + 180.0) % 360.0
             s_sign, s_deg = lon_to_sign_deg(south_lon)
+            body_lons["South Node"] = south_lon
             planets.append({
-                "name": "South Node",
-                "sign": s_sign, "deg": s_deg,
+                "name": "South Node", "sign": s_sign, "deg": s_deg,
                 "lon": round(south_lon, 4), "lat": 0.0, "speed": 0.0
             })
         except Exception:
             pass
 
-        # 6) Aspects (degree-based, using the longitudes we already computed)
-        # Build a {name: lon} map from the planets list we just created
-        body_lons = {p["name"]: p.get("lon") for p in planets if "lon" in p}
-        
-        # include nodes if present
-        if any(p.get("name") == "North Node" for p in planets):
-            body_lons["North Node"] = next(p["lon"] for p in planets if p["name"] == "North Node")
-        if any(p.get("name") == "South Node" for p in planets):
-            body_lons["South Node"] = next(p["lon"] for p in planets if p["name"] == "South Node")
-        
-        names_for_aspects = [
-            "Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","Uranus","Neptune","Pluto",
-            "North Node","South Node"
-        ]
-        names_for_aspects = [n for n in names_for_aspects if n in body_lons]
-        
+        # 5) Aspects using computed longitudes (no flatlib.get calls)
+        names_for_aspects = [n for n in PLANET_LABELS + ["North Node","South Node"] if n in body_lons]
         asp_results = []
         for i, na in enumerate(names_for_aspects):
             lonA = body_lons[na] % 360.0
@@ -295,20 +216,14 @@ def natal(payload: NatalInput):
                     diff = abs(dist - exact)
                     if diff <= orb:
                         asp_results.append({
-                            "a": na,
-                            "b": nb,
-                            "type": name,
-                            "orb": round(diff, 2),
-                            "dist": round(dist, 2),
-                            "exact": exact
+                            "a": na, "b": nb, "type": name,
+                            "orb": round(diff, 2), "dist": round(dist, 2), "exact": exact
                         })
                         break
 
-
-        # 7) Response
+        # 6) Response
         asc_obj = angle_to_obj("ASC", asc.lon)
         mc_obj  = angle_to_obj("MC",  mc.lon)
-
         return {
             "meta": {
                 "house_system": payload.house_system,
@@ -319,26 +234,15 @@ def natal(payload: NatalInput):
             "houses": houses,
             "planets": planets,
             "aspects": asp_results,
-            "rising_sign": {"sign": asc_obj["sign"], "deg": asc_obj["deg"]} 
+            "rising_sign": {"sign": asc_obj["sign"], "deg": asc_obj["deg"]},
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        # Surface a readable error in the API instead of a generic 500
         raise HTTPException(status_code=500, detail=f"Calculation error: {e}")
-
-SWE_IDS = {
-    "Sun": swe.SUN,
-    "Moon": swe.MOON,
-    "Mercury": swe.MERCURY,
-    "Venus": swe.VENUS,
-    "Mars": swe.MARS,
-    "Jupiter": swe.JUPITER,
-    "Saturn": swe.SATURN,
-    "Uranus": swe.URANUS,
-    "Neptune": swe.NEPTUNE,
-    "Pluto": swe.PLUTO,
-}
 
 @app.get("/healthz")
 def health():
     return {"ok": True}
+
