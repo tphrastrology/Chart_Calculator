@@ -21,30 +21,30 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 # ---- Libraries
-from flatlib import const, angle
-from flatlib.geopos import GeoPos
-from flatlib.datetime import Datetime
-from flatlib.chart import Chart
+# We keep flatlib only for constants if you want, but angles/houses now use pyswisseph directly.
+from flatlib import const  # still referenced for future-proofing, but not required for angles/houses
 import flatlib.ephem
+from flatlib.datetime import Datetime  # optional (not used once we switch fully to swe)
 import swisseph as swe
 import os
+
+app = FastAPI(title="Natal Chart API", version="1.0.2")
 
 # ---- Ephemeris path (point to repo root or 'ephe')
 flatlib.ephem.ephepath = os.getenv("EPHE_PATH", ".")
 swe.set_ephe_path(flatlib.ephem.ephepath)
 
-app = FastAPI(title="Natal Chart API", version="1.0.1")
-
-# ---- House systems (flatlib constant names vary; these are correct)
-HOUSE_MAP = {
-    "Placidus":      const.HOUSES_PLACIDUS,
-    "Koch":          const.HOUSES_KOCH,
-    "Porphyry":      const.HOUSES_PORPHYRIUS,  # spelling in flatlib
-    "Porphyrius":    const.HOUSES_PORPHYRIUS,
-    "Regiomontanus": const.HOUSES_REGIOMONTANUS,
-    "Campanus":      const.HOUSES_CAMPANUS,
-    "Equal":         const.HOUSES_EQUAL,
-    "WholeSign":     const.HOUSES_WHOLE_SIGN,
+# ---- House system mapping for Swiss Ephemeris
+# Swiss letters: P=Placidus, K=Koch, O=Porphyry, R=Regiomontanus, C=Campanus, E=Equal, W=Whole Sign
+HSYS_LETTER = {
+    "Placidus":      b"P",
+    "Koch":          b"K",
+    "Porphyry":      b"O",
+    "Porphyrius":    b"O",
+    "Regiomontanus": b"R",
+    "Campanus":      b"C",
+    "Equal":         b"E",
+    "WholeSign":     b"W",
 }
 
 # ---- Signs + helpers
@@ -124,8 +124,8 @@ class NatalInput(BaseModel):
     @classmethod
     def valid_house(cls, v):
         key = ALIASES.get(str(v).strip().lower(), v)
-        if key not in HOUSE_MAP:
-            raise ValueError(f"house_system must be one of: {', '.join(HOUSE_MAP.keys())}")
+        if key not in HSYS_LETTER:
+            raise ValueError(f"house_system must be one of: {', '.join(HSYS_LETTER.keys())}")
         return key
 
 # ---- Time helper
@@ -147,44 +147,46 @@ def natal(payload: NatalInput, request: Request):
         # 1) Normalize to UTC
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
 
-        # 2) Build a Chart WITHOUT objects to avoid flatlib ephem calls
-        #    IDs=[] prevents Chart() from preloading planetary objects (the source of tuple errors)
-        fl_dt = Datetime(utc_dt.strftime("%Y/%m/%d"), utc_dt.strftime("%H:%M"), "+00:00")
-        pos = GeoPos(lat=payload.latitude, lon=payload.longitude)
-        chart = Chart(fl_dt, pos, IDs=[], hsys=HOUSE_MAP[payload.house_system])
-
-        # 3) Angles & houses are safe via flatlib
-        asc = angle.ASC(chart)
-        mc  = angle.MC(chart)
-        houses = []
-        for i in range(1, 13):
-            cusp = chart.houses.getHouse(i)
-            s, d = lon_to_sign_deg(cusp.lon)
-            houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp.lon % 360.0, 4)})
-
-        # 4) Planet longitudes via pyswisseph (robust & independent of flatlib objects)
+        # 2) Julian Day and basic inputs
         jdut = swe.julday(
             int(utc_dt.strftime("%Y")),
             int(utc_dt.strftime("%m")),
             int(utc_dt.strftime("%d")),
             int(utc_dt.strftime("%H")) + int(utc_dt.strftime("%M"))/60.0,
         )
+        lat = payload.latitude
+        lon = payload.longitude
 
+        # 3) Houses & angles via Swiss Ephemeris
+        hsys = HSYS_LETTER[payload.house_system]
+        cusps, ascmc = swe.houses_ex(jdut, swe.FLG_SWIEPH, lat, lon, hsys)
+        # ascmc: [Asc, MC, ARMC, vertex, EquAsc, co-Asc (W), co-Asc (M), polar Asc]
+        asc_lon = ascmc[0]
+        mc_lon  = ascmc[1]
+
+        houses = []
+        # pyswisseph returns cusps as a list-like of length 13 where index 1..12 are valid
+        for i in range(1, 13):
+            cusp_lon = cusps[i]
+            s, d = lon_to_sign_deg(cusp_lon)
+            houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp_lon % 360.0, 4)})
+
+        # 4) Planets via pyswisseph (robust)
         planets = []
         body_lons = {}
         for label in PLANET_LABELS:
             try:
-                lon, lat = swe_calc_lonlat(jdut, SWE_IDS[label])
-                s, d = lon_to_sign_deg(lon)
-                body_lons[label] = lon
+                lon_p, lat_p = swe_calc_lonlat(jdut, SWE_IDS[label])
+                s, d = lon_to_sign_deg(lon_p)
+                body_lons[label] = lon_p
                 planets.append({
                     "name": label, "sign": s, "deg": d,
-                    "lon": round(lon, 4), "lat": round(lat, 4), "speed": 0.0
+                    "lon": round(lon_p, 4), "lat": round(lat_p, 4), "speed": 0.0
                 })
             except Exception as e:
                 planets.append({"name": label, "error": f"calc failed: {e}"})
 
-        # Nodes (Mean if present, else True) + South Node
+        # Nodes (Mean if available, else True) + South Node
         try:
             node_pid = getattr(swe, "MEAN_NODE", getattr(swe, "TRUE_NODE"))
             node_lon, _ = swe_calc_lonlat(jdut, node_pid)
@@ -204,7 +206,7 @@ def natal(payload: NatalInput, request: Request):
         except Exception:
             pass
 
-        # 5) Aspects using computed longitudes (no flatlib.get calls)
+        # 5) Aspects using computed longitudes
         names_for_aspects = [n for n in PLANET_LABELS + ["North Node","South Node"] if n in body_lons]
         asp_results = []
         for i, na in enumerate(names_for_aspects):
@@ -222,13 +224,13 @@ def natal(payload: NatalInput, request: Request):
                         break
 
         # 6) Response
-        asc_obj = angle_to_obj("ASC", asc.lon)
-        mc_obj  = angle_to_obj("MC",  mc.lon)
+        asc_obj = angle_to_obj("ASC", asc_lon)
+        mc_obj  = angle_to_obj("MC",  mc_lon)
         return {
             "meta": {
                 "house_system": payload.house_system,
                 "datetime_utc": utc_iso,
-                "location": {"lat": payload.latitude, "lng": payload.longitude},
+                "location": {"lat": lat, "lng": lon},
             },
             "angles": {"ASC": asc_obj, "MC": mc_obj},
             "houses": houses,
@@ -245,4 +247,5 @@ def natal(payload: NatalInput, request: Request):
 @app.get("/healthz")
 def health():
     return {"ok": True}
+
 
