@@ -14,25 +14,23 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+# Minimal, robust FastAPI app that uses ONLY swe.houses (no houses_ex) for angles/cusps
+# and uses pyswisseph for planet longitudes. Avoids flatlib entirely to sidestep
+# any version-specific wrappers that caused 'tuple index out of range' earlier.
+
 from datetime import datetime
 from dateutil import tz
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
-
-# ---- Libraries
-import flatlib.ephem
 import swisseph as swe
 import os
 
-app = FastAPI(title="Natal Chart API", version="1.0.4")
+app = FastAPI(title="Natal Chart API", version="1.0.5-minimal")
 
-# ---- Ephemeris path (point to repo root or 'ephe')
-flatlib.ephem.ephepath = os.getenv("EPHE_PATH", ".")
-swe.set_ephe_path(flatlib.ephem.ephepath)
+EPHE_PATH = os.getenv("EPHE_PATH", ".")
+swe.set_ephe_path(EPHE_PATH)
 
-# ---- House system mapping for Swiss Ephemeris (H must be bytes for houses_ex)
-# Swiss letters: P=Placidus, K=Koch, O=Porphyry, R=Regiomontanus, C=Campanus, E=Equal, W=Whole Sign
 HSYS_CHAR = {
     "Placidus":      "P",
     "Koch":          "K",
@@ -44,26 +42,19 @@ HSYS_CHAR = {
     "WholeSign":     "W",
 }
 
-# ---- Signs + helpers
 SIGNS = [
     "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
     "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
 ]
 
-def lon_to_sign_deg(lon: float):
-    lon = lon % 360.0
-    sign_index = int(lon // 30)
-    deg_in_sign = lon - sign_index * 30
-    return SIGNS[sign_index], round(deg_in_sign, 2)
-
-def angle_to_obj(name: str, lon: float):
-    sign, deg = lon_to_sign_deg(lon)
-    return {"name": name, "sign": sign, "deg": deg, "lon": round(lon % 360.0, 4)}
-
-# ---- Planet labels and aspect definitions
 PLANET_LABELS = [
     "Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","Uranus","Neptune","Pluto"
 ]
+SWE_IDS = {
+    "Sun": swe.SUN, "Moon": swe.MOON, "Mercury": swe.MERCURY, "Venus": swe.VENUS,
+    "Mars": swe.MARS, "Jupiter": swe.JUPITER, "Saturn": swe.SATURN,
+    "Uranus": swe.URANUS, "Neptune": swe.NEPTUNE, "Pluto": swe.PLUTO,
+}
 ASPECTS = [
     ("conjunction", 0,   8),
     ("opposition",  180, 8),
@@ -72,11 +63,42 @@ ASPECTS = [
     ("sextile",     60,  5),
 ]
 
-# ---- Robust pyswisseph calculator
-# Tries Swiss ephemeris with speed, then without, then Moshier fallback.
-# Always returns (lon, lat).
+class NatalInput(BaseModel):
+    date: str = Field(..., example="1990-06-12")
+    time: str = Field(..., example="14:23")
+    timezone: str = Field(..., example="America/New_York")
+    latitude: float
+    longitude: float
+    house_system: Optional[str] = Field(default="Placidus")
+
+    @field_validator("house_system")
+    @classmethod
+    def valid_house(cls, v):
+        key = str(v).strip()
+        if key not in HSYS_CHAR:
+            raise ValueError(f"house_system must be one of: {', '.join(HSYS_CHAR.keys())}")
+        return key
+
+
+def lon_to_sign_deg(lon: float):
+    lon = lon % 360.0
+    sign_index = int(lon // 30)
+    deg_in_sign = lon - sign_index * 30
+    return SIGNS[sign_index], round(deg_in_sign, 2)
+
+
+def to_utc_iso(date_str, time_str, tzname):
+    local_tz = tz.gettz(tzname)
+    if not local_tz:
+        raise ValueError("Invalid timezone string. Use IANA, e.g., 'America/New_York'.")
+    naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    local_dt = naive.replace(tzinfo=local_tz)
+    utc_dt = local_dt.astimezone(tz.UTC)
+    return utc_dt, utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def swe_calc_lonlat(jdut: float, planet_id: int):
+    # Try Swiss ephemeris with speed; then without; then Moshier.
     try:
         vals, _flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
         if isinstance(vals, (list, tuple)) and len(vals) >= 2:
@@ -94,81 +116,12 @@ def swe_calc_lonlat(jdut: float, planet_id: int):
         raise RuntimeError("pyswisseph returned invalid tuple")
     return vals[0] % 360.0, vals[1]
 
-SWE_IDS = {
-    "Sun": swe.SUN, "Moon": swe.MOON, "Mercury": swe.MERCURY, "Venus": swe.VENUS,
-    "Mars": swe.MARS, "Jupiter": swe.JUPITER, "Saturn": swe.SATURN,
-    "Uranus": swe.URANUS, "Neptune": swe.NEPTUNE, "Pluto": swe.PLUTO,
-}
-
-# ---- Request model
-ALIASES = {
-    "porphyry": "Porphyry",
-    "porphyrius": "Porphyrius",
-    "wholesign": "WholeSign",
-    "whole sign": "WholeSign",
-    "whole-sign": "WholeSign",
-}
-
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional
-
-class NatalInput(BaseModel):
-    date: str = Field(..., example="1990-06-12")
-    time: str = Field(..., example="14:23")
-    timezone: str = Field(..., example="America/New_York")
-    latitude: float
-    longitude: float
-    house_system: Optional[str] = Field(default="Placidus")
-
-    @field_validator("house_system")
-    @classmethod
-    def valid_house(cls, v):
-        key = ALIASES.get(str(v).strip().lower(), v)
-        if key not in HSYS_CHAR:
-            raise ValueError(f"house_system must be one of: {', '.join(HSYS_CHAR.keys())}")
-        return key
-
-# ---- Time helper
-
-def to_utc_iso(date_str, time_str, tzname):
-    local_tz = tz.gettz(tzname)
-    if not local_tz:
-        raise ValueError("Invalid timezone string. Use IANA, e.g., 'America/New_York'.")
-    naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-    local_dt = naive.replace(tzinfo=local_tz)
-    utc_dt = local_dt.astimezone(tz.UTC)
-    return utc_dt, utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-# ---- Houses/angles helper (handles both signatures precisely)
-
-def compute_houses_angles(jdut: float, geolat: float, geolon: float, hsys_char: str):
-    """Return (cusps_list, asc_lon, mc_lon).
-    - Try houses_ex(jdut, flags, lat, lon, b'H').
-    - If that TypeErrors, fall back to houses(jdut, lat, lon, 'H').
-    """
-    # First, try houses_ex with bytes code
-    try:
-        cusps, ascmc = swe.houses_ex(jdut, swe.FLG_SWIEPH, geolat, geolon, hsys_char.encode("ascii"))
-        asc_lon = ascmc[0]
-        mc_lon  = ascmc[1]
-        return cusps, asc_lon, mc_lon
-    except TypeError:
-        pass
-    # Fallback: older signature uses str for house code
-    cusps, ascmc = swe.houses(jdut, geolat, geolon, hsys_char)
-    asc_lon = ascmc[0]
-    mc_lon  = ascmc[1]
-    return cusps, asc_lon, mc_lon
-
-# ---- Endpoint
 
 @app.post("/natal")
 def natal(payload: NatalInput):
     try:
-        # 1) Normalize to UTC
+        # UTC
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
-
-        # 2) Julian Day and inputs
         jdut = swe.julday(
             int(utc_dt.strftime("%Y")),
             int(utc_dt.strftime("%m")),
@@ -178,16 +131,18 @@ def natal(payload: NatalInput):
         lat = payload.latitude
         lon = payload.longitude
 
-        # 3) Houses & angles
-        hsys_char = HSYS_CHAR[payload.house_system]
-        cusps, asc_lon, mc_lon = compute_houses_angles(jdut, lat, lon, hsys_char)
+        # --- Houses & angles using ONLY swe.houses (signature is stable)
+        hsys = HSYS_CHAR[payload.house_system]
+        cusps, ascmc = swe.houses(jdut, lat, lon, hsys)
+        asc_lon = ascmc[0]
+        mc_lon  = ascmc[1]
         houses = []
         for i in range(1, 13):
             cusp_lon = cusps[i]
             s, d = lon_to_sign_deg(cusp_lon)
             houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp_lon % 360.0, 4)})
 
-        # 4) Planets via pyswisseph (robust)
+        # --- Planets via pyswisseph
         planets = []
         body_lons = {}
         for label in PLANET_LABELS:
@@ -202,7 +157,7 @@ def natal(payload: NatalInput):
             except Exception as e:
                 planets.append({"name": label, "error": f"calc failed: {e}"})
 
-        # Nodes (Mean if available, else True) + South Node
+        # --- Nodes (Mean if available, else True) + South Node
         try:
             node_pid = getattr(swe, "MEAN_NODE", getattr(swe, "TRUE_NODE"))
             node_lon, _ = swe_calc_lonlat(jdut, node_pid)
@@ -222,7 +177,7 @@ def natal(payload: NatalInput):
         except Exception:
             pass
 
-        # 5) Aspects using computed longitudes
+        # --- Aspects (from computed longitudes)
         names_for_aspects = [n for n in PLANET_LABELS + ["North Node","South Node"] if n in body_lons]
         asp_results = []
         for i, na in enumerate(names_for_aspects):
@@ -239,20 +194,21 @@ def natal(payload: NatalInput):
                         })
                         break
 
-        # 6) Response
-        asc_obj = angle_to_obj("ASC", asc_lon)
-        mc_obj  = angle_to_obj("MC",  mc_lon)
+        # --- Response
+        asc_sign, asc_deg = lon_to_sign_deg(asc_lon)
+        mc_sign, mc_deg   = lon_to_sign_deg(mc_lon)
         return {
             "meta": {
                 "house_system": payload.house_system,
                 "datetime_utc": utc_iso,
                 "location": {"lat": lat, "lng": lon},
             },
-            "angles": {"ASC": asc_obj, "MC": mc_obj},
+            "angles": {"ASC": {"name":"ASC","sign":asc_sign,"deg":asc_deg,"lon":round(asc_lon,4)},
+                        "MC":  {"name":"MC","sign":mc_sign,"deg":mc_deg,"lon":round(mc_lon,4)}},
             "houses": houses,
             "planets": planets,
             "aspects": asp_results,
-            "rising_sign": {"sign": asc_obj["sign"], "deg": asc_obj["deg"]},
+            "rising_sign": {"sign": asc_sign, "deg": asc_deg},
         }
 
     except HTTPException:
@@ -263,7 +219,4 @@ def natal(payload: NatalInput):
 @app.get("/healthz")
 def health():
     return {"ok": True}
-
-
-
 
