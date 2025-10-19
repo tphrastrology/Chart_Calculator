@@ -54,7 +54,9 @@ else:
 # Use the chosen node ID; we'll compute South Node ourselves later.
 PLANET_LIST = [
   const.SUN, const.MOON,
-  const.MERCURY, const.VENUS, const.MARS
+  const.MERCURY, const.VENUS, const.MARS,
+  const.JUPITER, const.SATURN,
+  const.URANUS, const.NEPTUNE, const.PLUTO,
 ]
 
 
