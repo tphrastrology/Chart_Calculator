@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 # flatlib / Swiss Ephemeris
-from flatlib import const, aspects, angle
+from flatlib import const, angle
 from flatlib.geopos import GeoPos
 from flatlib.datetime import Datetime
 from flatlib.chart import Chart
@@ -52,13 +52,15 @@ PLANET_LIST = [
     const.NORTH_NODE, const.SOUTH_NODE
 ]
 
+# Aspect definitions: (name, exact_degrees, max_orb_degrees)
 ASPECTS = [
-    (aspects.CONJUNCTION, 8),
-    (aspects.OPPOSITION, 8),
-    (aspects.TRINE, 7),
-    (aspects.SQUARE, 6),
-    (aspects.SEXTILE, 5),
+    ("conjunction", 0,   8),
+    ("opposition",  180, 8),
+    ("trine",       120, 7),
+    ("square",      90,  6),
+    ("sextile",     60,  5),
 ]
+
 
 SIGNS = [
     "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
@@ -144,22 +146,24 @@ def natal(payload: NatalInput):
     planets = [pt(p) for p in PLANET_LIST]
 
     # aspects
-    asp_results = []
-    for i, a in enumerate(PLANET_LIST):
-        A = chart.get(a); lonA = A.lon % 360.0
-        for b in PLANET_LIST[i+1:]:
-            B = chart.get(b); lonB = B.lon % 360.0
-            dist = min(abs(lonA - lonB), 360.0 - abs(lonA - lonB))
-            for asp_type, orb in ASPECTS:
-                exact = aspects.ASPECTS[asp_type]
-                diff = abs(dist - exact)
-                if diff <= orb:
-                    asp_results.append({
-                        "a": A.body, "b": B.body,
-                        "type": aspects.NAME[asp_type],
-                        "orb": round(diff, 2), "dist": round(dist, 2), "exact": exact
-                    })
-                    break
+asp_results = []
+for i, a in enumerate(PLANET_LIST):
+    A = chart.get(a); lonA = A.lon % 360.0
+    for b in PLANET_LIST[i+1:]:
+        B = chart.get(b); lonB = B.lon % 360.0
+        dist = min(abs(lonA - lonB), 360.0 - abs(lonA - lonB))
+        for name, exact, orb in ASPECTS:
+            diff = abs(dist - exact)
+            if diff <= orb:
+                asp_results.append({
+                    "a": A.body,
+                    "b": B.body,
+                    "type": name,
+                    "orb": round(diff, 2),
+                    "dist": round(dist, 2),
+                    "exact": exact
+                })
+                break
 
     asc_obj = angle_to_obj("ASC", asc.lon)
     mc_obj  = angle_to_obj("MC",  mc.lon)
