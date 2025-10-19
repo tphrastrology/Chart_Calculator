@@ -51,8 +51,9 @@ HOUSE_MAP = {
 PLANET_LIST = [
     const.SUN, const.MOON, const.MERCURY, const.VENUS, const.MARS,
     const.JUPITER, const.SATURN, const.URANUS, const.NEPTUNE, const.PLUTO,
-    const.NORTH_NODE, const.SOUTH_NODE
+    const.MEAN_NODE  # use mean node; we'll derive South Node
 ]
+
 
 # Aspect definitions: (name, exact_degrees, max_orb_degrees)
 ASPECTS = [
@@ -131,6 +132,13 @@ def natal(payload: NatalInput):
     pos = GeoPos(lat=payload.latitude, lon=payload.longitude)
     chart = Chart(fl_dt, pos, IDs=PLANET_LIST, hsys=HOUSE_MAP[payload.house_system])
 
+    try:
+        # Angles, houses, planets as you already have them…
+    ...
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ephemeris/ID error: {e}")
+
+
     # angles & houses
     asc = angle.ASC(chart); mc = angle.MC(chart)
     houses = []
@@ -146,6 +154,19 @@ def natal(payload: NatalInput):
         return {"name": p.body, "sign": s, "deg": d, "lon": round(p.lon % 360.0, 4),
                 "lat": round(getattr(p, "lat", 0.0), 4), "speed": round(getattr(p, "speed", 0.0), 5)}
     planets = [pt(p) for p in PLANET_LIST]
+
+    # Derive South Node as opposite the Mean Node
+    node = chart.get(const.MEAN_NODE)
+    south_lon = (node.lon + 180.0) % 360.0
+    s_sign, s_deg = lon_to_sign_deg(south_lon)
+    planets.append({
+        "name": "South Node",
+        "sign": s_sign,
+        "deg": s_deg,
+        "lon": round(south_lon, 4),
+        "lat": 0.0,
+        "speed": 0.0
+    })
 
     # aspects
     asp_results = []
