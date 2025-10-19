@@ -23,18 +23,20 @@
 
 from datetime import datetime
 from dateutil import tz
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 import swisseph as swe
 import os
+
+# ---- Config / Secrets
 API_KEY = os.getenv("API_KEY")
-
-app = FastAPI(title="Natal Chart API", version="1.0.7-ultra")
-
 EPHE_PATH = os.getenv("EPHE_PATH", ".")
 swe.set_ephe_path(EPHE_PATH)
 
+app = FastAPI(title="Natal Chart API", version="1.0.7-ultra-fixed")
+
+# ---- House codes (Swiss Ephemeris expects a 1-byte code)
 HSYS_CHAR = {
     "Placidus":      b"P",
     "Koch":          b"K",
@@ -80,7 +82,10 @@ class NatalInput(BaseModel):
     def valid_house(cls, v):
         key = str(v).strip()
         if key not in HSYS_CHAR:
-            raise ValueError(f"house_system must be one of: {', '.join(k.decode() for k in HSYS_CHAR.keys())}")
+            # keys are plain strings; don't .decode()
+            raise ValueError(
+                "house_system must be one of: " + ", ".join(HSYS_CHAR.keys())
+            )
         return key
 
 
@@ -119,15 +124,16 @@ def swe_calc_lonlat(jdut: float, planet_id: int):
         pass
     vals, _ = swe.calc_ut(jdut, planet_id, swe.FLG_MOSEPH)
     if not ok(vals):
-        raise RuntimeError("pyswisseph returned invalid tuple for planet id %s" % planet_id)
+        raise RuntimeError(f"pyswisseph returned invalid tuple for planet id {planet_id}")
     return vals[0] % 360.0, vals[1]
 
 
 @app.post("/natal")
-from fastapi import Header
-def natal(payload: NatalInput, x_api_key: str | None = Header(default=None)):
+def natal(payload: NatalInput, x_api_key: Optional[str] = Header(default=None)):
+    # Simple header auth
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
     try:
         # UTC & Julian Day
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
@@ -140,7 +146,7 @@ def natal(payload: NatalInput, x_api_key: str | None = Header(default=None)):
         lat = float(payload.latitude)
         lon = float(payload.longitude)
 
-        # Houses & angles — force byte house code
+        # Houses & angles — pass a 1-byte house code (our dict already stores bytes)
         hsys = HSYS_CHAR[payload.house_system]
         cusps_raw, ascmc = swe.houses(jdut, lat, lon, hsys)
         if not (isinstance(ascmc, (list, tuple)) and len(ascmc) >= 2):
@@ -241,7 +247,7 @@ def natal(payload: NatalInput, x_api_key: str | None = Header(default=None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Calculation error: {e}")
 
+
 @app.get("/healthz")
 def health():
     return {"ok": True}
-
