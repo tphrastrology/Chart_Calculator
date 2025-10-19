@@ -146,24 +146,24 @@ def natal(payload: NatalInput):
     planets = [pt(p) for p in PLANET_LIST]
 
     # aspects
-asp_results = []
-for i, a in enumerate(PLANET_LIST):
-    A = chart.get(a); lonA = A.lon % 360.0
-    for b in PLANET_LIST[i+1:]:
-        B = chart.get(b); lonB = B.lon % 360.0
-        dist = min(abs(lonA - lonB), 360.0 - abs(lonA - lonB))
-        for name, exact, orb in ASPECTS:
-            diff = abs(dist - exact)
-            if diff <= orb:
-                asp_results.append({
-                    "a": A.body,
-                    "b": B.body,
-                    "type": name,
-                    "orb": round(diff, 2),
-                    "dist": round(dist, 2),
-                    "exact": exact
-                })
-                break
+    asp_results = []
+    for i, a in enumerate(PLANET_LIST):
+        A = chart.get(a); lonA = A.lon % 360.0
+        for b in PLANET_LIST[i+1:]:
+            B = chart.get(b); lonB = B.lon % 360.0
+            dist = min(abs(lonA - lonB), 360.0 - abs(lonA - lonB))
+            for name, exact, orb in ASPECTS:
+                diff = abs(dist - exact)
+                if diff <= orb:
+                    asp_results.append({
+                        "a": A.body,
+                        "b": B.body,
+                        "type": name,
+                        "orb": round(diff, 2),
+                        "dist": round(dist, 2),
+                        "exact": exact
+                    })
+                    break
 
     asc_obj = angle_to_obj("ASC", asc.lon)
     mc_obj  = angle_to_obj("MC",  mc.lon)
