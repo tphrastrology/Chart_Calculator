@@ -21,14 +21,13 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 # ---- Libraries
-# We keep flatlib only for constants if you want, but angles/houses now use pyswisseph directly.
-from flatlib import const  # still referenced for future-proofing, but not required for angles/houses
+# Flatlib kept only for constants in case you extend later.
+from flatlib import const  # not required for core calc
 import flatlib.ephem
-from flatlib.datetime import Datetime  # optional (not used once we switch fully to swe)
 import swisseph as swe
 import os
 
-app = FastAPI(title="Natal Chart API", version="1.0.2")
+app = FastAPI(title="Natal Chart API", version="1.0.3")
 
 # ---- Ephemeris path (point to repo root or 'ephe')
 flatlib.ephem.ephepath = os.getenv("EPHE_PATH", ".")
@@ -36,15 +35,15 @@ swe.set_ephe_path(flatlib.ephem.ephepath)
 
 # ---- House system mapping for Swiss Ephemeris
 # Swiss letters: P=Placidus, K=Koch, O=Porphyry, R=Regiomontanus, C=Campanus, E=Equal, W=Whole Sign
-HSYS_LETTER = {
-    "Placidus":      b"P",
-    "Koch":          b"K",
-    "Porphyry":      b"O",
-    "Porphyrius":    b"O",
-    "Regiomontanus": b"R",
-    "Campanus":      b"C",
-    "Equal":         b"E",
-    "WholeSign":     b"W",
+HSYS_CHAR = {
+    "Placidus":      "P",
+    "Koch":          "K",
+    "Porphyry":      "O",
+    "Porphyrius":    "O",
+    "Regiomontanus": "R",
+    "Campanus":      "C",
+    "Equal":         "E",
+    "WholeSign":     "W",
 }
 
 # ---- Signs + helpers
@@ -124,8 +123,8 @@ class NatalInput(BaseModel):
     @classmethod
     def valid_house(cls, v):
         key = ALIASES.get(str(v).strip().lower(), v)
-        if key not in HSYS_LETTER:
-            raise ValueError(f"house_system must be one of: {', '.join(HSYS_LETTER.keys())}")
+        if key not in HSYS_CHAR:
+            raise ValueError(f"house_system must be one of: {', '.join(HSYS_CHAR.keys())}")
         return key
 
 # ---- Time helper
@@ -139,6 +138,24 @@ def to_utc_iso(date_str, time_str, tzname):
     utc_dt = local_dt.astimezone(tz.UTC)
     return utc_dt, utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+# ---- Houses/angles helper (handles both signatures)
+
+def compute_houses_angles(jdut: float, geolat: float, geolon: float, hsys_char: str):
+    """Return (cusps_list, asc_lon, mc_lon) using houses_ex if available, else houses()."""
+    # Try houses_ex with flags first: (jdut, flags, lat, lon, hsys)
+    try:
+        cusps, ascmc = swe.houses_ex(jdut, swe.FLG_SWIEPH, geolat, geolon, hsys_char.encode())
+        asc_lon = ascmc[0]
+        mc_lon = ascmc[1]
+        return cusps, asc_lon, mc_lon
+    except TypeError:
+        # Fallback signature: houses(jdut, lat, lon, hsys_char)
+        cusps, ascmc = swe.houses(jdut, geolat, geolon, hsys_char)
+        # ascmc is (Asc, MC, ARMC, Vertex, EquAsc, co-Asc(W), co-Asc(M), PolarAsc)
+        asc_lon = ascmc[0]
+        mc_lon = ascmc[1]
+        return cusps, asc_lon, mc_lon
+
 # ---- Endpoint
 
 @app.post("/natal")
@@ -147,7 +164,7 @@ def natal(payload: NatalInput, request: Request):
         # 1) Normalize to UTC
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
 
-        # 2) Julian Day and basic inputs
+        # 2) Julian Day and inputs
         jdut = swe.julday(
             int(utc_dt.strftime("%Y")),
             int(utc_dt.strftime("%m")),
@@ -157,15 +174,10 @@ def natal(payload: NatalInput, request: Request):
         lat = payload.latitude
         lon = payload.longitude
 
-        # 3) Houses & angles via Swiss Ephemeris
-        hsys = HSYS_LETTER[payload.house_system]
-        cusps, ascmc = swe.houses_ex(jdut, swe.FLG_SWIEPH, lat, lon, hsys)
-        # ascmc: [Asc, MC, ARMC, vertex, EquAsc, co-Asc (W), co-Asc (M), polar Asc]
-        asc_lon = ascmc[0]
-        mc_lon  = ascmc[1]
-
+        # 3) Houses & angles via Swiss (compatible with both APIs)
+        hsys_char = HSYS_CHAR[payload.house_system]
+        cusps, asc_lon, mc_lon = compute_houses_angles(jdut, lat, lon, hsys_char)
         houses = []
-        # pyswisseph returns cusps as a list-like of length 13 where index 1..12 are valid
         for i in range(1, 13):
             cusp_lon = cusps[i]
             s, d = lon_to_sign_deg(cusp_lon)
@@ -247,5 +259,6 @@ def natal(payload: NatalInput, request: Request):
 @app.get("/healthz")
 def health():
     return {"ok": True}
+
 
 
