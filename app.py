@@ -29,8 +29,6 @@ import flatlib.ephem
 flatlib.ephem.ephepath = "."  # or "ephe" if you move the files later
 
 import flatlib.ephem, os
-print("EPHE PATH:", flatlib.ephem.ephepath, "FILES:", os.listdir(flatlib.ephem.ephepath))
-
 
 app = FastAPI(title="Natal Chart API", version="1.0.0")
 
