@@ -45,15 +45,22 @@ HOUSE_MAP = {
     "WholeSign":     const.HOUSES_WHOLE_SIGN      # <-- correct spelling
 }
 
+# ---- Node ID selection (handles different flatlib versions) ----
+# We'll pick whichever lunar node constant exists in this flatlib build.
+for _attr in ("MEAN_NODE", "TRUE_NODE", "NORTH_NODE"):
+    if hasattr(const, _attr):
+        NODE_ID = getattr(const, _attr)
+        break
+else:
+    raise ImportError("No lunar node constant (MEAN/TRUE/NORTH) found in flatlib.const")
 
-
-
-# Use Mean Node; we'll compute South Node by opposition
+# Use the chosen node ID; we'll compute South Node ourselves later.
 PLANET_LIST = [
     const.SUN, const.MOON, const.MERCURY, const.VENUS, const.MARS,
     const.JUPITER, const.SATURN, const.URANUS, const.NEPTUNE, const.PLUTO,
-    const.MEAN_NODE
+    NODE_ID
 ]
+
 
 # Aspect definitions: (name, exact_degrees, max_orb_degrees)
 ASPECTS = [
@@ -64,11 +71,11 @@ ASPECTS = [
     ("sextile",     60,  5),
 ]
 
-
 SIGNS = [
     "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
     "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
 ]
+
 
 def lon_to_sign_deg(lon):
     lon = lon % 360.0
@@ -159,9 +166,9 @@ def natal(payload: NatalInput):
 
         planets = [pt(p) for p in PLANET_LIST]
 
-        # Derive South Node as opposite of Mean Node
-        mean_node = chart.get(const.MEAN_NODE)
-        south_lon = (mean_node.lon + 180.0) % 360.0
+        # Derive South Node as opposite of the selected Node
+        node = chart.get(NODE_ID)
+        south_lon = (node.lon + 180.0) % 360.0
         s_sign, s_deg = lon_to_sign_deg(south_lon)
         planets.append({
             "name": "South Node",
@@ -171,6 +178,7 @@ def natal(payload: NatalInput):
             "lat": 0.0,
             "speed": 0.0
         })
+
 
         # 6) Aspects (degree-based, version-proof)
         asp_results = []
