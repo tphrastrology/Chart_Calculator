@@ -31,6 +31,15 @@ app = FastAPI(title="Natal Chart API", version="1.0.5-minimal")
 EPHE_PATH = os.getenv("EPHE_PATH", ".")
 swe.set_ephe_path(EPHE_PATH)
 
+def houses_compat(jdut: float, geolat: float, geolon: float, hsys_char: str):
+    """Call swe.houses using a byte house code if required; fallback to str."""
+    try:
+        # some builds expect a 1-byte code
+        return swe.houses(jdut, geolat, geolon, hsys_char.encode("ascii"))
+    except TypeError:
+        # others accept a plain 1-char string
+        return swe.houses(jdut, geolat, geolon, hsys_char)
+
 HSYS_CHAR = {
     "Placidus":      "P",
     "Koch":          "K",
@@ -133,7 +142,7 @@ def natal(payload: NatalInput):
 
         # --- Houses & angles using ONLY swe.houses (signature is stable)
         hsys = HSYS_CHAR[payload.house_system]
-        cusps, ascmc = swe.houses(jdut, lat, lon, hsys)
+        cusps, ascmc = houses_compat(jdut, lat, lon, hsys)
         asc_lon = ascmc[0]
         mc_lon  = ascmc[1]
         houses = []
