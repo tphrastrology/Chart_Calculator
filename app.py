@@ -55,8 +55,7 @@ else:
 PLANET_LIST = [
   const.SUN, const.MOON,
   const.MERCURY, const.VENUS, const.MARS,
-  const.JUPITER, const.SATURN,
-  const.URANUS, const.NEPTUNE, const.PLUTO,
+  const.JUPITER, const.SATURN
 ]
 
 
