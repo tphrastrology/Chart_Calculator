@@ -124,7 +124,10 @@ def swe_calc_lonlat(jdut: float, planet_id: int):
 
 
 @app.post("/natal")
-def natal(payload: NatalInput):
+from fastapi import Header
+def natal(payload: NatalInput, x_api_key: str | None = Header(default=None)):
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         # UTC & Julian Day
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
