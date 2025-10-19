@@ -269,25 +269,41 @@ def natal(payload: NatalInput):
         except Exception:
             pass
 
-        # 6) Aspects (degree-based, version-proof)
+        # 6) Aspects (degree-based, using the longitudes we already computed)
+        # Build a {name: lon} map from the planets list we just created
+        body_lons = {p["name"]: p.get("lon") for p in planets if "lon" in p}
+        
+        # include nodes if present
+        if any(p.get("name") == "North Node" for p in planets):
+            body_lons["North Node"] = next(p["lon"] for p in planets if p["name"] == "North Node")
+        if any(p.get("name") == "South Node" for p in planets):
+            body_lons["South Node"] = next(p["lon"] for p in planets if p["name"] == "South Node")
+        
+        names_for_aspects = [
+            "Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","Uranus","Neptune","Pluto",
+            "North Node","South Node"
+        ]
+        names_for_aspects = [n for n in names_for_aspects if n in body_lons]
+        
         asp_results = []
-        for i, a in enumerate(PLANET_LIST):
-            A = chart.get(a); lonA = A.lon % 360.0
-            for b in PLANET_LIST[i+1:]:
-                B = chart.get(b); lonB = B.lon % 360.0
+        for i, na in enumerate(names_for_aspects):
+            lonA = body_lons[na] % 360.0
+            for nb in names_for_aspects[i+1:]:
+                lonB = body_lons[nb] % 360.0
                 dist = min(abs(lonA - lonB), 360.0 - abs(lonA - lonB))
                 for name, exact, orb in ASPECTS:
                     diff = abs(dist - exact)
                     if diff <= orb:
                         asp_results.append({
-                            "a": A.body,
-                            "b": B.body,
+                            "a": na,
+                            "b": nb,
                             "type": name,
                             "orb": round(diff, 2),
                             "dist": round(dist, 2),
                             "exact": exact
                         })
                         break
+
 
         # 7) Response
         asc_obj = angle_to_obj("ASC", asc.lon)
