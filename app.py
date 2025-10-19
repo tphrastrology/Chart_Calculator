@@ -28,6 +28,48 @@ from flatlib.chart import Chart
 import flatlib.ephem
 flatlib.ephem.ephepath = "." 
 
+import swisseph as swe
+
+def pt_with_fallback(name):
+    """Return planet dict; fallback via swe.calc_ut for Saturn/Uranus if flatlib chokes."""
+    try:
+        p = chart.get(name)
+        s, d = lon_to_sign_deg(p.lon)
+        return {
+            "name": p.body,
+            "sign": s, "deg": d,
+            "lon": round(p.lon % 360.0, 4),
+            "lat": round(getattr(p, "lat", 0.0), 4),
+            "speed": round(getattr(p, "speed", 0.0), 5)
+        }
+    except Exception:
+        # fallback only for Saturn/Uranus
+        name_map = {
+            getattr(const, "SATURN"):  swe.SATURN,
+            getattr(const, "URANUS"):  swe.URANUS,
+        }
+        if name not in name_map:
+            raise  # rethrow for others
+
+        # compute via pyswisseph
+        swe.set_ephe_path(flatlib.ephem.ephepath)
+        jdut = swe.julday(
+            int(utc_dt.strftime("%Y")),
+            int(utc_dt.strftime("%m")),
+            int(utc_dt.strftime("%d")),
+            int(utc_dt.strftime("%H")) + int(utc_dt.strftime("%M"))/60.0
+        )
+        vals, _flags = swe.calc_ut(jdut, name_map[name])  # (lon, lat, dist, …)
+        lon = vals[0] % 360.0
+        s, d = lon_to_sign_deg(lon)
+        label = "Saturn" if name == getattr(const, "SATURN") else "Uranus"
+        return {
+            "name": label,
+            "sign": s, "deg": d,
+            "lon": round(lon, 4),
+            "lat": round(vals[1], 4) if len(vals) > 1 else 0.0,
+            "speed": 0.0  # leave 0.0; speed via fallback is optional
+        }
 
 app = FastAPI(title="Natal Chart API", version="1.0.0")
 
@@ -72,7 +114,6 @@ SIGNS = [
     "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
     "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"
 ]
-
 
 def lon_to_sign_deg(lon):
     lon = lon % 360.0
@@ -151,6 +192,12 @@ def natal(payload: NatalInput):
         # 5) Planets
         planets = []
         errors = []
+        for name in PLANET_LIST:
+            try:
+                planets.append(pt_with_fallback(name))
+            except Exception as e:
+                bname = getattr(name, "name", str(name))
+                errors.append({"body": bname, "error": str(e)})
         
         def pt(name):
             p = chart.get(name)  # if this line crashes for a body, we'll trap it below
