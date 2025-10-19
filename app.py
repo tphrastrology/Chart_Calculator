@@ -18,6 +18,9 @@
 # and uses pyswisseph for planet longitudes. Avoids flatlib entirely to sidestep
 # any version-specific wrappers that caused 'tuple index out of range' earlier.
 
+# Ultra-compat version: forces byte house code, guards all tuple shapes, never indexes blindly.
+# Drop in as app.py
+
 from datetime import datetime
 from dateutil import tz
 from fastapi import FastAPI, HTTPException
@@ -26,29 +29,20 @@ from typing import Optional
 import swisseph as swe
 import os
 
-app = FastAPI(title="Natal Chart API", version="1.0.5-minimal")
+app = FastAPI(title="Natal Chart API", version="1.0.7-ultra")
 
 EPHE_PATH = os.getenv("EPHE_PATH", ".")
 swe.set_ephe_path(EPHE_PATH)
 
-def houses_compat(jdut: float, geolat: float, geolon: float, hsys_char: str):
-    """Call swe.houses using a byte house code if required; fallback to str."""
-    try:
-        # some builds expect a 1-byte code
-        return swe.houses(jdut, geolat, geolon, hsys_char.encode("ascii"))
-    except TypeError:
-        # others accept a plain 1-char string
-        return swe.houses(jdut, geolat, geolon, hsys_char)
-
 HSYS_CHAR = {
-    "Placidus":      "P",
-    "Koch":          "K",
-    "Porphyry":      "O",
-    "Porphyrius":    "O",
-    "Regiomontanus": "R",
-    "Campanus":      "C",
-    "Equal":         "E",
-    "WholeSign":     "W",
+    "Placidus":      b"P",
+    "Koch":          b"K",
+    "Porphyry":      b"O",
+    "Porphyrius":    b"O",
+    "Regiomontanus": b"R",
+    "Campanus":      b"C",
+    "Equal":         b"E",
+    "WholeSign":     b"W",
 }
 
 SIGNS = [
@@ -85,7 +79,7 @@ class NatalInput(BaseModel):
     def valid_house(cls, v):
         key = str(v).strip()
         if key not in HSYS_CHAR:
-            raise ValueError(f"house_system must be one of: {', '.join(HSYS_CHAR.keys())}")
+            raise ValueError(f"house_system must be one of: {', '.join(k.decode() for k in HSYS_CHAR.keys())}")
         return key
 
 
@@ -107,29 +101,31 @@ def to_utc_iso(date_str, time_str, tzname):
 
 
 def swe_calc_lonlat(jdut: float, planet_id: int):
-    # Try Swiss ephemeris with speed; then without; then Moshier.
+    # Strictly validate tuple shape at each step
+    def ok(x):
+        return isinstance(x, (list, tuple)) and len(x) >= 2
     try:
-        vals, _flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
-        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
+        vals, _ = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+        if ok(vals):
             return vals[0] % 360.0, vals[1]
     except Exception:
         pass
     try:
-        vals, _flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH)
-        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
+        vals, _ = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH)
+        if ok(vals):
             return vals[0] % 360.0, vals[1]
     except Exception:
         pass
-    vals, _flags = swe.calc_ut(jdut, planet_id, swe.FLG_MOSEPH)
-    if not (isinstance(vals, (list, tuple)) and len(vals) >= 2):
-        raise RuntimeError("pyswisseph returned invalid tuple")
+    vals, _ = swe.calc_ut(jdut, planet_id, swe.FLG_MOSEPH)
+    if not ok(vals):
+        raise RuntimeError("pyswisseph returned invalid tuple for planet id %s" % planet_id)
     return vals[0] % 360.0, vals[1]
 
 
 @app.post("/natal")
 def natal(payload: NatalInput):
     try:
-        # UTC
+        # UTC & Julian Day
         utc_dt, utc_iso = to_utc_iso(payload.date, payload.time, payload.timezone)
         jdut = swe.julday(
             int(utc_dt.strftime("%Y")),
@@ -137,21 +133,36 @@ def natal(payload: NatalInput):
             int(utc_dt.strftime("%d")),
             int(utc_dt.strftime("%H")) + int(utc_dt.strftime("%M"))/60.0,
         )
-        lat = payload.latitude
-        lon = payload.longitude
+        lat = float(payload.latitude)
+        lon = float(payload.longitude)
 
-        # --- Houses & angles using ONLY swe.houses (signature is stable)
+        # Houses & angles — force byte house code
         hsys = HSYS_CHAR[payload.house_system]
-        cusps, ascmc = houses_compat(jdut, lat, lon, hsys)
-        asc_lon = ascmc[0]
-        mc_lon  = ascmc[1]
+        cusps_raw, ascmc = swe.houses(jdut, lat, lon, hsys)
+        if not (isinstance(ascmc, (list, tuple)) and len(ascmc) >= 2):
+            raise RuntimeError("houses() did not return ASC/MC as expected")
+        asc_lon = float(ascmc[0])
+        mc_lon  = float(ascmc[1])
+
+        # Normalize cusp array defensively
+        if isinstance(cusps_raw, (list, tuple)):
+            L = len(cusps_raw)
+            if L == 13:
+                cusps = [float(cusps_raw[i]) for i in range(1, 13)]
+            elif L >= 12:
+                cusps = [float(cusps_raw[i]) for i in range(0, 12)]
+            else:
+                raise RuntimeError(f"Unexpected cusps length: {L}")
+        else:
+            raise RuntimeError("houses() cusps not list/tuple")
+
         houses = []
-        for i in range(1, 13):
+        for i in range(12):
             cusp_lon = cusps[i]
             s, d = lon_to_sign_deg(cusp_lon)
-            houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp_lon % 360.0, 4)})
+            houses.append({"n": i+1, "sign": s, "deg": d, "lon": round(cusp_lon % 360.0, 4)})
 
-        # --- Planets via pyswisseph
+        # Planets
         planets = []
         body_lons = {}
         for label in PLANET_LABELS:
@@ -166,7 +177,7 @@ def natal(payload: NatalInput):
             except Exception as e:
                 planets.append({"name": label, "error": f"calc failed: {e}"})
 
-        # --- Nodes (Mean if available, else True) + South Node
+        # Nodes
         try:
             node_pid = getattr(swe, "MEAN_NODE", getattr(swe, "TRUE_NODE"))
             node_lon, _ = swe_calc_lonlat(jdut, node_pid)
@@ -186,7 +197,7 @@ def natal(payload: NatalInput):
         except Exception:
             pass
 
-        # --- Aspects (from computed longitudes)
+        # Aspects
         names_for_aspects = [n for n in PLANET_LABELS + ["North Node","South Node"] if n in body_lons]
         asp_results = []
         for i, na in enumerate(names_for_aspects):
@@ -203,9 +214,10 @@ def natal(payload: NatalInput):
                         })
                         break
 
-        # --- Response
+        # Format angles
         asc_sign, asc_deg = lon_to_sign_deg(asc_lon)
         mc_sign, mc_deg   = lon_to_sign_deg(mc_lon)
+
         return {
             "meta": {
                 "house_system": payload.house_system,
