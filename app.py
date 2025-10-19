@@ -25,10 +25,34 @@ from flatlib import const, angle
 from flatlib.geopos import GeoPos
 from flatlib.datetime import Datetime
 from flatlib.chart import Chart
-import flatlib.ephem
-flatlib.ephem.ephepath = "." 
-
 import swisseph as swe
+import flatlib.ephem
+flatlib.ephem.ephepath = "."      # or "ephe" if that’s where your files are
+swe.set_ephe_path(flatlib.ephem.ephepath)
+
+# pyswisseph-based calculator with robust fallbacks
+def swe_calc_lonlat(jdut, planet_id):
+    """Return (lon, lat) using Swiss ephemeris; fallback to Moshier if needed."""
+    # 1) Try Swiss ephemeris with speed flag (safe default)
+    try:
+        vals, flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
+            return vals[0] % 360.0, vals[1]
+    except Exception:
+        pass
+    # 2) Fallback to Swiss ephemeris without speed
+    try:
+        vals, flags = swe.calc_ut(jdut, planet_id, swe.FLG_SWIEPH)
+        if isinstance(vals, (list, tuple)) and len(vals) >= 2:
+            return vals[0] % 360.0, vals[1]
+    except Exception:
+        pass
+    # 3) Last resort: Moshier (no .se1 files needed)
+    vals, flags = swe.calc_ut(jdut, planet_id, swe.FLG_MOSEPH)
+    if not (isinstance(vals, (list, tuple)) and len(vals) >= 2):
+        raise RuntimeError("pyswisseph returned invalid tuple")
+    return vals[0] % 360.0, vals[1]
+
 
 def pt_with_fallback(name):
     """Return planet dict; fallback via swe.calc_ut for Saturn/Uranus if flatlib chokes."""
@@ -176,7 +200,7 @@ def natal(payload: NatalInput):
         fl_dt = Datetime(utc_dt.strftime("%Y/%m/%d"), utc_dt.strftime("%H:%M"), "+00:00")
         pos = GeoPos(lat=payload.latitude, lon=payload.longitude)
 
-        chart = Chart(fl_dt, pos, IDs=PLANET_LIST, hsys=HOUSE_MAP[payload.house_system])
+        chart = Chart(fl_dt, pos, hsys=HOUSE_MAP[payload.house_system])  # no IDs preload
 
         # 3) Angles
         asc = angle.ASC(chart)
@@ -190,52 +214,60 @@ def natal(payload: NatalInput):
             houses.append({"n": i, "sign": s, "deg": d, "lon": round(cusp.lon % 360.0, 4)})
 
         # 5) Planets
+        # --- planets via pyswisseph to avoid flatlib tuple issues ---
+        # Build Julian Day in UTC for pyswisseph
+        jdut = swe.julday(
+            int(utc_dt.strftime("%Y")),
+            int(utc_dt.strftime("%m")),
+            int(utc_dt.strftime("%d")),
+            int(utc_dt.strftime("%H")) + int(utc_dt.strftime("%M"))/60.0
+        )
+        
+        planet_labels = ["Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","Uranus","Neptune","Pluto"]
         planets = []
-        errors = []
-        for name in PLANET_LIST:
+        
+        for label in planet_labels:
             try:
-                planets.append(pt_with_fallback(name))
+                lon, lat = swe_calc_lonlat(jdut, SWE_IDS[label])
+                s, d = lon_to_sign_deg(lon)
+                planets.append({
+                    "name": label,
+                    "sign": s,
+                    "deg": d,
+                    "lon": round(lon, 4),
+                    "lat": round(lat, 4),
+                    "speed": 0.0  # omit true speed to keep things simple/stable
+                })
             except Exception as e:
-                bname = getattr(name, "name", str(name))
-                errors.append({"body": bname, "error": str(e)})
+                # If any single body fails, skip it but keep the API responsive
+                planets.append({
+                    "name": label,
+                    "error": f"calc failed: {e}"
+                })
         
-        def pt(name):
-            p = chart.get(name)  # if this line crashes for a body, we'll trap it below
-            s, d = lon_to_sign_deg(p.lon)
-            return {
-                "name": p.body,
-                "sign": s,
-                "deg": d,
-                "lon": round(p.lon % 360.0, 4),
-                "lat": round(getattr(p, "lat", 0.0), 4),
-                "speed": round(getattr(p, "speed", 0.0), 5)
-            }
-        
-        for name in PLANET_LIST:
-            try:
-                planets.append(pt(name))
-            except Exception as e:
-                # Record the body that failed so the response is still useful
-                bname = name if isinstance(name, str) else getattr(name, "name", str(name))
-                errors.append({"body": bname, "error": str(e)})
-        
-        # Add South Node only if the node fetched cleanly
+        # Node + South Node (derived)
         try:
-            node = chart.get(NODE_ID)
-            south_lon = (node.lon + 180.0) % 360.0
+            # Use mean node if available in your flatlib build; otherwise compute via pyswisseph
+            if 'NODE_ID' in globals():
+                node_obj = chart.get(NODE_ID)
+                node_lon = node_obj.lon % 360.0
+            else:
+                node_lon, _ = swe_calc_lonlat(jdut, getattr(swe, "MEAN_NODE", swe.TRUE_NODE))
+            n_sign, n_deg = lon_to_sign_deg(node_lon)
+            planets.append({
+                "name": "North Node",
+                "sign": n_sign, "deg": n_deg,
+                "lon": round(node_lon, 4), "lat": 0.0, "speed": 0.0
+            })
+            south_lon = (node_lon + 180.0) % 360.0
             s_sign, s_deg = lon_to_sign_deg(south_lon)
             planets.append({
                 "name": "South Node",
-                "sign": s_sign,
-                "deg": s_deg,
-                "lon": round(south_lon, 4),
-                "lat": 0.0,
-                "speed": 0.0
+                "sign": s_sign, "deg": s_deg,
+                "lon": round(south_lon, 4), "lat": 0.0, "speed": 0.0
             })
-        except Exception as e:
-            errors.append({"body": "South Node (derived)", "error": str(e)})
-
-
+        except Exception:
+            pass
 
         # 6) Aspects (degree-based, version-proof)
         asp_results = []
@@ -278,6 +310,18 @@ def natal(payload: NatalInput):
         # Surface a readable error in the API instead of a generic 500
         raise HTTPException(status_code=500, detail=f"Calculation error: {e}")
 
+SWE_IDS = {
+    "Sun": swe.SUN,
+    "Moon": swe.MOON,
+    "Mercury": swe.MERCURY,
+    "Venus": swe.VENUS,
+    "Mars": swe.MARS,
+    "Jupiter": swe.JUPITER,
+    "Saturn": swe.SATURN,
+    "Uranus": swe.URANUS,
+    "Neptune": swe.NEPTUNE,
+    "Pluto": swe.PLUTO,
+}
 
 @app.get("/healthz")
 def health():
